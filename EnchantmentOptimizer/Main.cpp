@@ -4,6 +4,8 @@
 #include <string>
 #include <iomanip>
 #include <future>
+#include <locale>
+#include <sstream>
 
 #include "EnchantInfo.h"
 #include "Item.h"
@@ -11,6 +13,16 @@
 #include "Timer.h"
 
 #define OUTPUT 0
+#define HAS_DEST(pair) (pair.first == 0 || pair.second == 0)
+
+template<class T>
+std::string FormatWithCommas(T value)
+{
+    std::stringstream ss;
+    ss.imbue(std::locale(""));
+    ss << std::fixed << value;
+    return ss.str();
+}
 
 void Split(std::string str, std::string delim, std::vector<std::string>& split)
 {
@@ -32,7 +44,7 @@ int Cost(Item& i1, Item& i2)
 
     for (Enchant enchant : i2.enchants)
     {
-        EnchantInfo info = enchants[static_cast<int>(enchant)];
+        EnchantInfo& info = enchants[(int)enchant];
         int multiplier = info.mul_item;
         if (i2.isBook)
         {
@@ -42,8 +54,8 @@ int Cost(Item& i1, Item& i2)
         totalCost += cost;
     }
 
-    int targetPenalty = pow(2, i1.priorPenalty) - 1;
-    int sacrificePenalty = pow(2, i2.priorPenalty) - 1;
+    int targetPenalty = (1 << i1.priorPenalty) - 1;
+    int sacrificePenalty = (1 << i2.priorPenalty) - 1;
     int penaltyCost = targetPenalty + sacrificePenalty;
 
     totalCost += penaltyCost;
@@ -55,6 +67,7 @@ bool Increment(std::vector<std::pair<int, int>>& p)
 {
     int permSize = p.size();
     int pairIndex;
+    bool valid = false;
     for (pairIndex = 1; pairIndex < permSize; pairIndex++)
     {
         std::pair<int, int>& pair = p[permSize - 1 - pairIndex];
@@ -90,11 +103,29 @@ bool Increment(std::vector<std::pair<int, int>>& p)
                     pair.second++;
                 }
             }
-            return true;
+            valid = true;
+            break;
         }
     }
 
-    return false;
+    if (!valid) { return false; }
+
+    bool hasDest = false;
+    for (pairIndex = 0; pairIndex < permSize; pairIndex++)
+    {
+        std::pair<int, int>& pair = p[pairIndex];
+
+        if (hasDest && !HAS_DEST(pair))
+        {
+            return Increment(p);
+        }
+        if (HAS_DEST(pair))
+        {
+            hasDest = true;
+        }
+    }
+
+    return true;
 }
 
 void Branch(std::vector<Item>& originalItemSet, std::vector<std::pair<int, int>>& optPerm, std::vector<int>& costs, int& bestCost, int& bestOrderness, int threadNum, int threadIndex)
@@ -116,18 +147,11 @@ void Branch(std::vector<Item>& originalItemSet, std::vector<std::pair<int, int>>
     int costSum, orderness;
     bestCost = 100000, bestOrderness = -1;
     std::vector<int> permCosts;
-    std::vector<Item> itemSetSource;
+    std::vector<Item> itemSetSource(originalItemSet);
     std::vector<Item*> itemSet;
 
-    int totalIter = 1;
-    for (int i = 2; i < originalItemSet.size(); i++)
-    {
-        totalIter *= i * i;
-    }
-
     bool finished = false;
-    int iter = threadIndex + 1;
-
+    uint64_t iter = threadIndex + 1;
 
     while (!finished)
     {
@@ -136,8 +160,7 @@ void Branch(std::vector<Item>& originalItemSet, std::vector<std::pair<int, int>>
         {
             if (iter % (threadNum * (10000 / threadNum) + 1) == 0)
             {
-                //std::cout << std::setprecision(3) << "\r" << (float)100 * iter / totalIter << "%   ";
-
+                std::cout << "\rPermutations tested: " << FormatWithCommas(iter) << "         ";
             }
         }
 #endif
@@ -152,6 +175,7 @@ void Branch(std::vector<Item>& originalItemSet, std::vector<std::pair<int, int>>
 
         costSum = 0, orderness = 0;
 
+        bool definitelyWorse = false;
         // Apply perm and calculate costs
         for (int n = 0; n < perm.size(); n++)
         {
@@ -163,6 +187,12 @@ void Branch(std::vector<Item>& originalItemSet, std::vector<std::pair<int, int>>
 
             costSum += levelCost * (levelCost + 6);
 
+            if (costSum > bestCost)
+            {
+                definitelyWorse = true;
+                break;
+            }
+
             // Add all of sacrifice's enchants to target
             target->enchants.reserve(target->enchants.size() + sacrifice->enchants.size());
             for (Enchant sacrificeEnchant : sacrifice->enchants)
@@ -173,26 +203,39 @@ void Branch(std::vector<Item>& originalItemSet, std::vector<std::pair<int, int>>
             itemSet.erase(itemSet.begin() + perm[n].second);
         }
 
-        // Calculate orderness
-        for (int i = 0; i < itemSet[0]->enchants.size() - 1; i++)
+        if (!definitelyWorse)
         {
-            if (enchants[static_cast<int>(itemSet[0]->enchants[i])].max >= enchants[static_cast<int>(itemSet[0]->enchants[i + 1])].max)
+            // Check if perm is the best yet
+            if (costSum < bestCost)
             {
-                orderness++;
+                bestCost = costSum;
+                bestOrderness = orderness;
+                optPerm = perm;
+                costs = permCosts;
             }
-        }
-        if (itemSet[0]->enchants[itemSet[0]->enchants.size() - 1] == Enchant::Mending)
-        {
-            orderness++;
-        }
+            else if (costSum == bestCost)
+            {
+                // Calculate orderness
+                for (int i = 0; i < itemSet[0]->enchants.size() - 1; i++)
+                {
+                    if (enchants[(int)(itemSet[0]->enchants[i])].max >= enchants[(int)(itemSet[0]->enchants[i + 1])].max)
+                    {
+                        orderness++;
+                    }
+                }
+                if (itemSet[0]->enchants[itemSet[0]->enchants.size() - 1] == Enchant::Mending)
+                {
+                    orderness++;
+                }
 
-        // Check if perm is the best yet
-        if (costSum < bestCost || ((costSum == bestCost) && orderness > bestOrderness))
-        {
-            bestCost = costSum;
-            bestOrderness = orderness;
-            optPerm = perm;
-            costs = permCosts;
+                if (orderness > bestOrderness)
+                {
+                    bestCost = costSum;
+                    bestOrderness = orderness;
+                    optPerm = perm;
+                    costs = permCosts;
+                }
+            }
         }
 
         // Increment perm (threadNum) times
@@ -212,14 +255,14 @@ void Branch(std::vector<Item>& originalItemSet, std::vector<std::pair<int, int>>
 
 void CombineOptimally(std::vector<Item>& originalItemSet, std::vector<std::pair<int, int>>& optPerm, std::vector<int>& costs)
 {
-    int totalIter = 1;
-    for (int i = 2; i < originalItemSet.size(); i++)
+    uint64_t totalIter = 1;
+    for (uint64_t i = 2; i < originalItemSet.size(); i++)
     {
         totalIter *= i * i;
     }
 
-    int hardThreads = std::thread::hardware_concurrency();
-    int threadNum = std::min(hardThreads, totalIter);
+    uint64_t hardThreads = std::thread::hardware_concurrency() - 1;
+    uint64_t threadNum = std::min(hardThreads, totalIter);
     std::vector<std::thread> threads;
     threads.reserve(threadNum);
 
@@ -265,9 +308,8 @@ int main()
     std::cout << "A: ";
     std::string itemIndexStr;
     
-    getline(std::cin, itemIndexStr);
-    //itemIndexStr = "0";
-
+    //getline(std::cin, itemIndexStr);
+    itemIndexStr = "0";
 
     std::cout << "=========================" << std::endl;
 
@@ -287,8 +329,8 @@ int main()
     std::string enchantsListStr;
 
 
-    getline(std::cin, enchantsListStr);
-    //enchantsListStr = "Fire Aspect,Knockback,Looting,Mending,Sharpness,Sweeping Edge,Unbreaking";
+    //getline(std::cin, enchantsListStr);
+    enchantsListStr = "9,16,17,21,31,35,37";
     
 
     std::cout << "=========================" << std::endl;
@@ -324,6 +366,7 @@ int main()
     std::cout << "Took: " << t.duration / 1000000.0 << "s" << std::endl;
     std::cout << std::endl;
 
+    int costSum = 0;
     for (int n = 0; n < optPerm.size(); n++)
     {
         Item& target = itemSet[optPerm[n].first];
@@ -380,6 +423,9 @@ int main()
             target.enchants.push_back(sacrificeEnchant);
         }
         itemSet.erase(itemSet.begin() + optPerm[n].second);
+
+        int levelCost = costs[n];
+        costSum += levelCost * (levelCost + 6);
     }
 
     std::cin.get();
