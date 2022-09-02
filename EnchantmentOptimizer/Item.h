@@ -2,19 +2,18 @@
 #include <vector>
 #include <string>
 
-#include "Enchants Data.h"
+#include "Enchantment.h"
 
-class Item
+struct Item
 {
-public:
-	bool isBook;
-	std::vector<Enchant> enchants;
-	int priorPenalty;
+	Item(bool isBook_, const std::vector<Enchantment>& enchants_, int prior_);
+	Item(const Enchantment& enchant);
 
-	Item(bool isBook_, std::vector<Enchant>& enchants_, int priorPenalty_)
-		: isBook(isBook_), enchants(enchants_), priorPenalty(priorPenalty_)
-	{}
-	Item(bool isBook_, std::vector<Enchant>&& enchants_, int priorPenalty_)
-		: isBook(isBook_), enchants(enchants_), priorPenalty(priorPenalty_)
-	{}
+	bool isBook;
+	std::vector<Enchantment> enchants;
+	int prior;
+
+	void operator+=(const Item& other);
+	std::string ToString() const;
+	static int CombineCost(const Item& i1, const Item& i2);
 };

@@ -5,170 +5,63 @@
 #include <iomanip>
 #include <future>
 #include <locale>
-#include <sstream>
+#include <ranges>
 
-#include "EnchantInfo.h"
-#include "Item.h"
-#include "Enchants Data.h"
+#include "Permutation.h"
 #include "Timer.h"
+#include "stringutility.h"
 
-#define OUTPUT 0
+#define OUTPUT 1
 #define HAS_DEST(pair) (pair.first == 0 || pair.second == 0)
 
-template<class T>
-std::string FormatWithCommas(T value)
-{
-    std::stringstream ss;
-    ss.imbue(std::locale(""));
-    ss << std::fixed << value;
-    return ss.str();
-}
+#define THREAD_COUT(stream) { std::stringstream ss; ss << stream; std::cout << ss.str(); }
 
-void Split(std::string str, std::string delim, std::vector<std::string>& split)
-{
-    split.clear();
-    size_t pos = 0;
-    std::string token;
-    while ((pos = str.find(delim)) != std::string::npos)
-    {
-        token = str.substr(0, pos);
-        split.push_back(token);
-        str.erase(0, pos + delim.length());
-    }
-    split.push_back(str);
-}
-
-int Cost(Item& i1, Item& i2)
-{
-    int totalCost = 0;
-
-    for (Enchant enchant : i2.enchants)
-    {
-        EnchantInfo& info = enchants[(int)enchant];
-        int multiplier = info.mul_item;
-        if (i2.isBook)
-        {
-            multiplier = info.mul_book;
-        }
-        int cost = multiplier * info.max;
-        totalCost += cost;
-    }
-
-    int targetPenalty = (1 << i1.priorPenalty) - 1;
-    int sacrificePenalty = (1 << i2.priorPenalty) - 1;
-    int penaltyCost = targetPenalty + sacrificePenalty;
-
-    totalCost += penaltyCost;
-
-    return totalCost;
-}
-
-bool Increment(std::vector<std::pair<int, int>>& p)
-{
-    int permSize = p.size();
-    int pairIndex;
-    bool valid = false;
-    for (pairIndex = 1; pairIndex < permSize; pairIndex++)
-    {
-        std::pair<int, int>& pair = p[permSize - 1 - pairIndex];
-        if (pair.first == pairIndex + 1 && pair.second == pairIndex)
-        {
-            // Pair is max
-            pair.first = 0;
-            pair.second = 1;
-        }
-        else
-        {
-            // Increment current pair
-            if (pair.second == pairIndex + 1)
-            {
-                pair.first++;
-                if (pair.first == 1)
-                {
-                    pair.second = 2;
-                }
-                else
-                {
-                    pair.second = 1;
-                }
-            }
-            else
-            {
-                if (pair.second == pair.first - 1)
-                {
-                    pair.second += 2;
-                }
-                else
-                {
-                    pair.second++;
-                }
-            }
-            valid = true;
-            break;
-        }
-    }
-
-    if (!valid) { return false; }
-
-    bool hasDest = false;
-    for (pairIndex = 0; pairIndex < permSize; pairIndex++)
-    {
-        std::pair<int, int>& pair = p[pairIndex];
-
-        if (hasDest && !HAS_DEST(pair))
-        {
-            return Increment(p);
-        }
-        if (HAS_DEST(pair))
-        {
-            hasDest = true;
-        }
-    }
-
-    return true;
-}
-
-void Branch(std::vector<Item>& originalItemSet, std::vector<std::pair<int, int>>& optPerm, std::vector<int>& costs, int& bestCost, int& bestOrderness, int threadNum, int threadIndex)
+void Branch(const std::vector<Item>& originalItemSet, Permutation& optPerm, int& bestCost, int& bestOrderness, int threadNum, int threadIndex)
 {
     int itemNum = originalItemSet.size();
+#if OUTPUT
+    uint64_t totalIter = 1;
+    for (uint64_t i = 2; i < originalItemSet.size(); i++)
+        totalIter *= i * i;
 
-    std::vector<std::pair<int, int>> perm;
-    perm.reserve(itemNum - 1);
-    for (int i = 0; i < itemNum - 1; i++)
-    {
-        perm.emplace_back(std::pair<int, int>(0, 1));
-    }
+    totalIter /= 3;
 
+    if (threadIndex == 0)
+        THREAD_COUT("Total: " << FormatWithCommas(totalIter) << '\n');
+#endif
+
+    Permutation perm;
+    perm.Initialize(itemNum - 1);
+
+    // Increment perm to initial state
     for (int inc = 0; inc < threadIndex; inc++)
-    {
-        if (!Increment(perm)) { return; }
-    }
+        if (!++perm) { return; }
 
     int costSum, orderness;
     bestCost = 100000, bestOrderness = -1;
-    std::vector<int> permCosts;
     std::vector<Item> itemSetSource(originalItemSet);
     std::vector<Item*> itemSet;
 
     bool finished = false;
     uint64_t iter = threadIndex + 1;
 
+    uint64_t nextmilestone = 10000;
     while (!finished)
     {
-#if OUTPUT == 1
+#if OUTPUT
         if (threadIndex == 0)
         {
-            if (iter % (threadNum * (10000 / threadNum) + 1) == 0)
+            if (iter > nextmilestone)
             {
-                std::cout << "\rPermutations tested: " << FormatWithCommas(iter) << "         ";
+                //std::cout << "\rPermutations tested: " << FormatWithCommas(iter) << "         ";
+                THREAD_COUT("\rProgress: " << (float)iter / totalIter * 100 << "%        ");
+                nextmilestone += 10000;
             }
         }
 #endif
 
         itemSet.clear();
-        permCosts.clear();
         itemSet.reserve(itemNum);
-        permCosts.reserve(itemNum - 1);
 
         itemSetSource = originalItemSet;
         for (Item& i : itemSetSource) { itemSet.push_back(&i); }
@@ -177,13 +70,13 @@ void Branch(std::vector<Item>& originalItemSet, std::vector<std::pair<int, int>>
 
         bool definitelyWorse = false;
         // Apply perm and calculate costs
-        for (int n = 0; n < perm.size(); n++)
+        for (int n = 0; n < perm.steps.size(); n++)
         {
-            Item* target = itemSet[perm[n].first];
-            Item* sacrifice = itemSet[perm[n].second];
+            auto pair = perm[n];
+            Item* target = itemSet[pair.first];
+            Item* sacrifice = itemSet[pair.second];
 
-            int levelCost = Cost(*target, *sacrifice);
-            permCosts.push_back(levelCost);
+            int levelCost = Item::CombineCost(*target, *sacrifice);
 
             costSum += levelCost * (levelCost + 6);
 
@@ -194,12 +87,7 @@ void Branch(std::vector<Item>& originalItemSet, std::vector<std::pair<int, int>>
             }
 
             // Add all of sacrifice's enchants to target
-            target->enchants.reserve(target->enchants.size() + sacrifice->enchants.size());
-            for (Enchant sacrificeEnchant : sacrifice->enchants)
-            {
-                target->enchants.push_back(sacrificeEnchant);
-            }
-            target->priorPenalty = std::max(target->priorPenalty, sacrifice->priorPenalty) + 1;
+            *target += *sacrifice;
             itemSet.erase(itemSet.begin() + perm[n].second);
         }
 
@@ -211,21 +99,14 @@ void Branch(std::vector<Item>& originalItemSet, std::vector<std::pair<int, int>>
                 bestCost = costSum;
                 bestOrderness = orderness;
                 optPerm = perm;
-                costs = permCosts;
             }
             else if (costSum == bestCost)
             {
                 // Calculate orderness
                 for (int i = 0; i < itemSet[0]->enchants.size() - 1; i++)
                 {
-                    if (enchants[(int)(itemSet[0]->enchants[i])].max >= enchants[(int)(itemSet[0]->enchants[i + 1])].max)
-                    {
+                    if ((itemSet[0]->enchants[i].max >= itemSet[0]->enchants[i + 1].max))
                         orderness++;
-                    }
-                }
-                if (itemSet[0]->enchants[itemSet[0]->enchants.size() - 1] == Enchant::Mending)
-                {
-                    orderness++;
                 }
 
                 if (orderness > bestOrderness)
@@ -233,7 +114,6 @@ void Branch(std::vector<Item>& originalItemSet, std::vector<std::pair<int, int>>
                     bestCost = costSum;
                     bestOrderness = orderness;
                     optPerm = perm;
-                    costs = permCosts;
                 }
             }
         }
@@ -241,10 +121,10 @@ void Branch(std::vector<Item>& originalItemSet, std::vector<std::pair<int, int>>
         // Increment perm (threadNum) times
         for (int inc = 0; inc < threadNum; inc++)
         {
-            if (!Increment(perm))
+            if (!++perm)
             {
-#if OUTPUT == 1
-                std::cout << "Thread: " << threadIndex << " finished" << std::endl;
+#if OUTPUT
+                THREAD_COUT("Thread: " << threadIndex << " finished" << std::endl);
 #endif
                 return;
             }
@@ -253,34 +133,32 @@ void Branch(std::vector<Item>& originalItemSet, std::vector<std::pair<int, int>>
     }
 }
 
-void CombineOptimally(std::vector<Item>& originalItemSet, std::vector<std::pair<int, int>>& optPerm, std::vector<int>& costs)
+void CombineOptimally(std::vector<Item>& originalItemSet, Permutation& optPerm)
 {
+    // Calculate total number of iterations
     uint64_t totalIter = 1;
     for (uint64_t i = 2; i < originalItemSet.size(); i++)
-    {
         totalIter *= i * i;
-    }
 
     uint64_t hardThreads = std::thread::hardware_concurrency() - 1;
     uint64_t threadNum = std::min(hardThreads, totalIter);
-    std::vector<std::thread> threads;
-    threads.reserve(threadNum);
 
-    std::vector<std::vector<std::pair<int, int>>> optPerms = std::vector<std::vector<std::pair<int, int>>>(threadNum);
+    // Prepare output values for the threads
+    std::vector<Permutation> optPerms = std::vector<Permutation>(threadNum);
     std::vector<int> totalCosts = std::vector<int>(threadNum);
     std::vector<int> ordernesses = std::vector<int>(threadNum);
-    std::vector<std::vector<int>> optCostLists = std::vector<std::vector<int>>(threadNum);
 
+    // Run threads
+    std::vector<std::thread> threads;
+    threads.reserve(threadNum);
     for (int t = 0; t < threadNum; t++)
-    {
-        threads.emplace_back(Branch, std::ref(originalItemSet), std::ref(optPerms[t]), std::ref(optCostLists[t]), std::ref(totalCosts[t]), std::ref(ordernesses[t]), threadNum, t);
-    }
+        threads.emplace_back(Branch, std::ref(originalItemSet), std::ref(optPerms[t]), std::ref(totalCosts[t]), std::ref(ordernesses[t]), threadNum, t);
 
+    // Wait for threads
     for (int t = 0; t < threadNum; t++)
-    {
         threads[t].join();
-    }
 
+    // Select best overall result
     int bestCost = 100000;
     int bestOrderness = -1;
     for (int t = 0; t < threadNum; t++)
@@ -290,143 +168,73 @@ void CombineOptimally(std::vector<Item>& originalItemSet, std::vector<std::pair<
             bestCost = totalCosts[t];
             bestOrderness = ordernesses[t];
             optPerm = optPerms[t];
-            costs = optCostLists[t];
+        }
+    }
+}
+
+std::vector<Item> GenerateItemSet(const std::string& enchantsListStr)
+{
+    std::vector<Item> itemSet;
+    itemSet.push_back({ false, {}, 0 });
+
+    auto enchantsSplitStr = Split(enchantsListStr, ",");
+
+    for (const auto& idStr : enchantsSplitStr)
+        itemSet.emplace_back(Enchantment(std::stoi(idStr)));
+
+    return itemSet;
+}
+
+void ModifyItemSetlevels(std::vector<Item>& itemSet)
+{
+    std::cout << "Enter new levels: \n";
+    for (Item& item : itemSet)
+    {
+        if (item.isBook)
+        {
+            std::cout << item.enchants[0].ToString() << ": ";
+
+            std::string res;
+            std::getline(std::cin, res);
+
+            int newLevel = std::stoi(res);
+            item.prior = newLevel - item.enchants[0].max;
         }
     }
 }
 
 int main()
 {
-    std::vector<std::string> items = { "Sword", "Pickaxe", "Axe", "Shovel", "Helmet", "Chestplate", "Leggings", "Boots", "Bow", "Crossbow", "Trident", "Rod", "Shield", "Hoe" };
-
-    std::cout << "Which item are you enchanting?" << std::endl << std::endl;
-    for (int i = 0; i < items.size(); i++)
-    {
-        std::cout << i << ": " << items[i] << std::endl;
-    }
-    std::cout << "=========================" << std::endl;
-    std::cout << "A: ";
-    std::string itemIndexStr;
-    
-    //getline(std::cin, itemIndexStr);
-    itemIndexStr = "0";
-
-    std::cout << "=========================" << std::endl;
-
-    std::string item = items[std::stoi(itemIndexStr)];
-
     std::cout << "Which enchantments would you like to apply?" << std::endl << std::endl;
-
-    int index = 0;
-    std::map<std::string, Enchant>::iterator it;
-    for (it = enchantsStrMap.begin(); it != enchantsStrMap.end(); it++)
-    {
-        std::cout << index << ": " << it->first << std::endl;
-        index++;
-    }
+    Enchantment::LogAllEnchants();
     std::cout << "=========================" << std::endl;
     std::cout << "A: ";
+
     std::string enchantsListStr;
-
-
-    //getline(std::cin, enchantsListStr);
-    enchantsListStr = "9,16,17,21,31,35,37";
-    
+    getline(std::cin, enchantsListStr);
+    //enchantsListStr = "10,17,21,31,33,35,37,38,39";
+    //enchantsListStr = "7,9,21,26,34,36,37,40,42";
 
     std::cout << "=========================" << std::endl;
 
-    std::vector<std::string> enchantsSplitStr;
-    Split(enchantsListStr, ",", enchantsSplitStr);
+    // Generate item set
+    std::vector<Item> itemSet = GenerateItemSet(enchantsListStr);
+    Permutation::SetMaxLength(itemSet.size() - 1);
 
-    std::vector<Item> itemSet;
-    itemSet.emplace_back(Item(false, {}, 0));
-    for (std::string enchant : enchantsSplitStr)
-    {
-        int currentIndex = 0;
-        int enchIndex = std::stoi(enchant);
-        std::map<std::string, Enchant>::iterator it;
-        for (it = enchantsStrMap.begin(); it != enchantsStrMap.end(); it++)
-        {
-            if (currentIndex == enchIndex)
-            {
-                itemSet.emplace_back(Item(true, { it->second }, 0));
-            }
-            currentIndex++;
-        }
-    }
+    std::cout << "Are all enchants the standard level? (y/n): ";
 
-    std::vector<std::pair<int, int>> optPerm;
-    std::vector<int> costs;
+    std::string res;
+    getline(std::cin, res);
+    if (res == "n")
+        ModifyItemSetlevels(itemSet);
 
-    Timer t;
-    CombineOptimally(itemSet, optPerm, costs);
-    t.Stop();
+    TIMER(calc);
+    Permutation optPerm;
+    CombineOptimally(itemSet, optPerm);
+    STOP_LOG(calc);
 
-    std::cout << std::endl;
-    std::cout << "Took: " << t.duration / 1000000.0 << "s" << std::endl;
-    std::cout << std::endl;
-
-    int costSum = 0;
-    for (int n = 0; n < optPerm.size(); n++)
-    {
-        Item& target = itemSet[optPerm[n].first];
-        Item& sacrifice = itemSet[optPerm[n].second];
-
-        int lineLength = 0;
-        std::string nStr = std::to_string(n + 1);
-        std::cout << nStr << ": (";
-        lineLength += nStr.size() + 3;
-
-        if (target.isBook)
-        {
-            for (int e = 0; e < target.enchants.size(); e++)
-            {
-                std::cout << enchToStr[target.enchants[e]];
-                lineLength += enchToStr[target.enchants[e]].size();
-                if (e != target.enchants.size() - 1)
-                {
-                    std::cout << ",";
-                    lineLength++;
-                }
-            }
-        }
-        else
-        {
-            std::cout << item;
-            lineLength += item.size();
-        }
-        
-        std::cout << ") + (";
-        lineLength += 5;
-
-        for (int e = 0; e < sacrifice.enchants.size(); e++)
-        {
-            lineLength += enchToStr[sacrifice.enchants[e]].size();
-            std::cout << enchToStr[sacrifice.enchants[e]];
-            if (e != sacrifice.enchants.size() - 1) 
-            {
-                std::cout << ",";
-                lineLength += 1;
-            }
-        }
-        std::cout << ")";
-        lineLength++;
-        for (int add = 0; add < 45 - lineLength; add++)
-        {
-            std::cout << " ";
-        }
-        std::cout << "|\t" << costs[n] << std::endl;
-
-        // Add all of sacrifice's enchants to target
-        for (Enchant sacrificeEnchant : sacrifice.enchants)
-        {
-            target.enchants.push_back(sacrificeEnchant);
-        }
-        itemSet.erase(itemSet.begin() + optPerm[n].second);
-
-        int levelCost = costs[n];
-        costSum += levelCost * (levelCost + 6);
-    }
-
-    std::cin.get();
+    // Print final result
+    freopen("log.log", "w", stdout);
+    optPerm.LogSteps(itemSet);
+    std::cout << std::flush;
 }

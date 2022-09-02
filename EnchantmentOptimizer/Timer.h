@@ -1,25 +1,38 @@
 #pragma once
+#include <iostream>
+#include <sstream>
 #include <chrono>
+using namespace std::chrono;
+
+#define TIMING 1
+
+#if TIMING
+#define TIMER(x) Timer x
+#define STOP_LOG(x) x.StopLog(#x)
+#else
+#define TIMER(x)
+#define STOP_LOG(x)
+#endif
 
 class Timer
 {
 public:
-    long long duration;
     Timer()
+        : startTimePoint(high_resolution_clock::now()) {}
+
+    void StopLog(std::string_view timerName = "")
     {
-        duration = 0;
-        m_StartTimePoint = std::chrono::high_resolution_clock::now();
-    }
+        duration x = high_resolution_clock::now() - startTimePoint;
+        uint64_t microSeconds = duration_cast<microseconds>(x).count();
 
-    void Stop()
-    {
-        auto endTimePoint = std::chrono::high_resolution_clock::now();
+        std::stringstream ss;
+        if (microSeconds < 1000)
+            ss << timerName << " took: " << microSeconds << "us\n";
+        else
+            ss << timerName << " took: " << microSeconds * 0.001 << "ms\n";
 
-        auto start = std::chrono::time_point_cast <std::chrono::microseconds> (m_StartTimePoint).time_since_epoch().count();
-        auto end = std::chrono::time_point_cast <std::chrono::microseconds> (endTimePoint).time_since_epoch().count();
-
-        duration = end - start;
+        std::cout << ss.str() << std::flush;
     }
 private:
-    std::chrono::time_point < std::chrono::high_resolution_clock > m_StartTimePoint;
+    time_point<high_resolution_clock> startTimePoint;
 };
